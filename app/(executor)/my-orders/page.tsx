@@ -358,6 +358,8 @@ function ExecutorOrdersContent() {
               const distanceKm = order.latitude && order.longitude && userLocation ? getDistanceKm(userLocation.lat, userLocation.lng, order.latitude, order.longitude) : null;
               const statusStr = (order.status || 'pending').toLowerCase();
               const isExpanded = expandedIds.has(orderKey);
+              
+              const isCarpenter = activeSession?.role === 'Carpenter' || order.type_of_service?.toLowerCase().includes('modular') || order.type_of_service?.toLowerCase().includes('carpenter');
 
               return (
                 <div key={orderKey} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
@@ -404,9 +406,11 @@ function ExecutorOrdersContent() {
                         <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
                           JOB: <span className="text-gray-600">{order.job_id || 'N/A'}</span>
                         </span>
-                        <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
-                          ORD: <span className="text-gray-600">{order.order_id || order.id?.substring(0, 8)}</span>
-                        </span>
+                        {!isCarpenter && (
+                           <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
+                             ORD: <span className="text-gray-600">{order.order_id || order.id?.substring(0, 8)}</span>
+                           </span>
+                        )}
                       </div>
 
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#5aaa3a] bg-[#edfae3] px-2 py-0.5 rounded border border-[#8ED26B]/30 w-max mb-3">
@@ -509,6 +513,7 @@ function ExecutorOrdersContent() {
                     const orderKey = order.id ?? order.job_id ?? order.order_id;
                     const distanceKm = order.latitude && order.longitude && userLocation ? getDistanceKm(userLocation.lat, userLocation.lng, order.latitude, order.longitude) : null;
                     const statusStr = (order.status || 'pending').toLowerCase();
+                    const isCarpenter = activeSession?.role === 'Carpenter' || order.type_of_service?.toLowerCase().includes('modular') || order.type_of_service?.toLowerCase().includes('carpenter');
 
                     return (
                       <tr key={orderKey} className="hover:bg-[#fcfdfc] transition-colors group">
@@ -523,9 +528,11 @@ function ExecutorOrdersContent() {
                               <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
                                 JOB: <span className="text-gray-600">{order.job_id || 'N/A'}</span>
                               </span>
-                              <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
-                                ORD: <span className="text-gray-600">{order.order_id || order.id?.substring(0,8)}</span>
-                              </span>
+                              {!isCarpenter && (
+                                 <span className="text-[10px] font-bold text-gray-400 tracking-wider font-mono">
+                                   ORD: <span className="text-gray-600">{order.order_id || order.id?.substring(0,8)}</span>
+                                 </span>
+                              )}
                             </div>
                             <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold text-[#5aaa3a] bg-[#edfae3] px-2 py-0.5 rounded border border-[#8ED26B]/30 w-max">
                               <Briefcase size={10} /> {order.type_of_service || 'Standard'}
