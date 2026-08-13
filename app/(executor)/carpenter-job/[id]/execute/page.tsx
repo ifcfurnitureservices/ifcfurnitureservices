@@ -46,7 +46,8 @@ export default function CarpenterExecutionPage() {
 
   // ── Task Update States ──
   const [taskCategory, setTaskCategory] = useState('');
-  const [taskSelfie, setTaskSelfie] = useState<{ file: File; preview: string } | null>(null);
+  // Product Photo(s) — mandatory minimum 2, gallery multi-select, unlimited additional uploads
+  const [taskProductPhotos, setTaskProductPhotos] = useState<{ file: File; preview: string }[]>([]);
   const [taskVideo, setTaskVideo] = useState<{ file: File; preview: string } | null>(null);
   const [remarks, setRemarks] = useState('');
   
@@ -296,20 +297,60 @@ export default function CarpenterExecutionPage() {
   };
 
   // ==========================================
+  // TASK CATEGORY CHANGE (BUG FIX)
+  // Switching category before submitting must clear any photos/video/
+  // voice-note/remarks already staged for the previous category, so they
+  // don't silently carry over into the newly selected task.
+  // ==========================================
+  const handleCategoryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newCategory = e.target.value;
+    if (newCategory !== taskCategory) {
+      setTaskProductPhotos([]);
+      setTaskVideo(null);
+      deleteRecording();
+      setRemarks('');
+    }
+    setTaskCategory(newCategory);
+  };
+
+  // ==========================================
+  // PRODUCT PHOTOS (multi-select from gallery, mandatory minimum 2)
+  // ==========================================
+  const handleProductPhotosChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const newPhotos = Array.from(files).map((file) => ({
+      file,
+      preview: URL.createObjectURL(file)
+    }));
+    setTaskProductPhotos((prev) => [...prev, ...newPhotos]);
+    // reset the input so selecting the same file(s) again later still fires onChange
+    e.target.value = '';
+  };
+
+  const removeProductPhoto = (index: number) => {
+    setTaskProductPhotos((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // ==========================================
   // 4. SUBMIT TASK UPDATE
   // ==========================================
   const handleUploadTask = async () => {
-    if (!taskCategory || !taskSelfie || !taskVideo) {
-      setActionError("Task Category, Worker Selfie, and Site Video are required.");
+    if (!taskCategory || taskProductPhotos.length < 2 || !taskVideo) {
+      setActionError("Task Category, at least 2 Product Photos, and Site Video are required.");
       return;
     }
     setSubmitting(true);
     setActionError('');
     
     try {
-      const selfiePath = `${projectId}/task-selfie-${Date.now()}.jpg`;
-      await supabase.storage.from('modular-project-docs').upload(selfiePath, taskSelfie.file);
-      const selfieUrl = supabase.storage.from('modular-project-docs').getPublicUrl(selfiePath).data.publicUrl;
+      const productPhotoUrls: string[] = [];
+      for (const photo of taskProductPhotos) {
+        const photoPath = `${projectId}/task-product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+        await supabase.storage.from('modular-project-docs').upload(photoPath, photo.file);
+        const photoUrl = supabase.storage.from('modular-project-docs').getPublicUrl(photoPath).data.publicUrl;
+        productPhotoUrls.push(photoUrl);
+      }
 
       const videoExt = taskVideo.file.name.split('.').pop();
       const videoPath = `${projectId}/task-video-${Date.now()}.${videoExt}`;
@@ -323,7 +364,7 @@ export default function CarpenterExecutionPage() {
         voiceUrl = supabase.storage.from('modular-project-docs').getPublicUrl(audioPath).data.publicUrl;
       }
 
-      const formattedRemarks = `[Selfie: ${selfieUrl}] ${remarks.trim()}`;
+      const formattedRemarks = `[ProductPhotos: ${productPhotoUrls.join('|')}] ${remarks.trim()}`;
 
       const { data: insertedTask, error } = await supabase.from('modular_task_updates').insert({
         project_id: projectId,
@@ -360,7 +401,7 @@ export default function CarpenterExecutionPage() {
       if (insertedTask) setCompletedTasks(prev => [insertedTask, ...prev]);
       
       setTaskCategory('');
-      setTaskSelfie(null);
+      setTaskProductPhotos([]);
       setTaskVideo(null);
       deleteRecording();
       setRemarks('');
@@ -677,19 +718,26 @@ export default function CarpenterExecutionPage() {
                 </h3>
                 <div className="space-y-4">
                   {completedTasks.map((task) => {
-                    const selfieMatch = task.remarks ? task.remarks.match(/\[Selfie:\s*(.*?)\]/) : null;
-                    const taskSelfieUrl = selfieMatch ? selfieMatch[1] : null;
-                    const cleanRemarks = task.remarks ? task.remarks.replace(/\[Selfie:\s*.*?\]\s*/g, '').trim() : 'No remarks';
+                    // Prefer the new multi-photo format; fall back to the old single-selfie
+                    // format so previously submitted tasks still render correctly.
+                    const productPhotosMatch = task.remarks ? task.remarks.match(/\[ProductPhotos:\s*(.*?)\]/) : null;
+                    const legacySelfieMatch = task.remarks ? task.remarks.match(/\[Selfie:\s*(.*?)\]/) : null;
+                    const productPhotoUrls = productPhotosMatch
+                      ? productPhotosMatch[1].split('|').filter(Boolean)
+                      : (legacySelfieMatch ? [legacySelfieMatch[1]] : []);
+                    const cleanRemarks = task.remarks
+                      ? task.remarks.replace(/\[ProductPhotos:\s*.*?\]\s*/g, '').replace(/\[Selfie:\s*.*?\]\s*/g, '').trim()
+                      : 'No remarks';
 
                     return (
                       <div key={task.id} className="border border-gray-100 rounded-xl p-4 bg-gray-50 hover:bg-gray-100/50 transition-colors flex flex-col sm:flex-row gap-4">
-                        <div className="flex gap-2 shrink-0">
-                          {taskSelfieUrl && (
-                            <a href={taskSelfieUrl} target="_blank" rel="noopener noreferrer" className="block w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-80 transition-opacity">
-                              <img src={taskSelfieUrl} alt="Selfie" className="w-full h-full object-cover opacity-90" />
-                              <div className="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-[8px] text-white text-center font-bold py-0.5">Selfie</div>
+                        <div className="flex gap-2 shrink-0 flex-wrap sm:max-w-[8.5rem]">
+                          {productPhotoUrls.map((url: string, idx: number) => (
+                            <a key={idx} href={url} target="_blank" rel="noopener noreferrer" className="block w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-80 transition-opacity">
+                              <img src={url} alt={`Product ${idx + 1}`} className="w-full h-full object-cover opacity-90" />
+                              <div className="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-[8px] text-white text-center font-bold py-0.5">Product</div>
                             </a>
-                          )}
+                          ))}
                           {task.media_url && (
                             <a href={task.media_url} target="_blank" rel="noopener noreferrer" className="block w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-80 transition-opacity">
                               {task.media_type === 'video' ? (
@@ -849,7 +897,7 @@ export default function CarpenterExecutionPage() {
                           <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">1. Task Category *</label>
                           <select 
                             value={taskCategory} 
-                            onChange={(e) => setTaskCategory(e.target.value)} 
+                            onChange={handleCategoryChange} 
                             className="w-full p-3.5 border border-gray-200 rounded-xl text-sm font-bold text-gray-700 focus:ring-2 focus:ring-blue-100 focus:outline-none transition-all"
                           >
                             <option value="" disabled>Select Task Category...</option>
@@ -865,40 +913,52 @@ export default function CarpenterExecutionPage() {
                           </select>
                         </div>
 
-                        {/* 2. Worker Selfie + 3. Site Video Row */}
+                        {/* 2. Product Photos (min 2, gallery multi-select, unlimited) */}
                         <div>
-                          <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">2 & 3. Mandatory Proofs *</label>
-                          <div className="grid grid-cols-2 gap-3 h-28">
-                            <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
-                              {taskSelfie ? (
-                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-green-50 p-2">
-                                  <CheckCircle2 size={18} className="text-green-600 mb-1" />
-                                  <span className="text-[10px] font-bold text-green-700 text-center">Selfie Captured</span>
-                                </div>
-                              ) : (
-                                <div className="flex flex-col items-center justify-center gap-1">
-                                  <Camera size={20} className="text-gray-400 group-hover:text-blue-500" />
-                                  <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Worker Selfie *</span>
-                                </div>
-                              )}
-                              <input type="file" accept="image/*" capture="user" onChange={(e) => handleFileChange(e, setTaskSelfie, false)} className="hidden" />
-                            </label>
-
-                            <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
-                              {taskVideo ? (
-                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-green-50 p-2">
-                                  <CheckCircle2 size={18} className="text-green-600 mb-1" />
-                                  <span className="text-[10px] font-bold text-green-700 text-center">Video Recorded</span>
-                                </div>
-                              ) : (
-                                <div className="flex flex-col items-center justify-center gap-1">
-                                  <Video size={20} className="text-gray-400 group-hover:text-blue-500" />
-                                  <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Site Video *</span>
-                                </div>
-                              )}
-                              <input type="file" accept="video/*, image/*" capture="environment" onChange={(e) => handleFileChange(e, setTaskVideo, true)} className="hidden" />
+                          <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">
+                            2. Product Photos (Min 2) * {taskProductPhotos.length > 0 && `— ${taskProductPhotos.length} selected`}
+                          </label>
+                          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                            {taskProductPhotos.map((photo, idx) => (
+                              <div key={idx} className="relative w-full aspect-square rounded-xl overflow-hidden border border-gray-200">
+                                <img src={photo.preview} alt={`Product ${idx + 1}`} className="w-full h-full object-cover" />
+                                <button
+                                  type="button"
+                                  onClick={() => removeProductPhoto(idx)}
+                                  className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-red-500 transition-colors"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ))}
+                            <label className="relative border-2 border-dashed border-gray-300 rounded-xl aspect-square flex flex-col items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors group">
+                              <Camera size={18} className="text-gray-400 group-hover:text-blue-500 mb-1" />
+                              <span className="text-[9px] font-bold text-gray-500 group-hover:text-blue-600 text-center px-1">Add Product Photos</span>
+                              <input type="file" accept="image/*" multiple onChange={handleProductPhotosChange} className="hidden" />
                             </label>
                           </div>
+                          {taskProductPhotos.length > 0 && taskProductPhotos.length < 2 && (
+                            <p className="text-[10px] text-red-400 font-bold mt-1.5">At least 2 photos required</p>
+                          )}
+                        </div>
+
+                        {/* 3. Site Video */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">3. Site Video *</label>
+                          <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 h-28 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
+                            {taskVideo ? (
+                              <div className="absolute inset-0 flex flex-col items-center justify-center bg-green-50 p-2">
+                                <CheckCircle2 size={18} className="text-green-600 mb-1" />
+                                <span className="text-[10px] font-bold text-green-700 text-center">Video Recorded</span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center justify-center gap-1">
+                                <Video size={20} className="text-gray-400 group-hover:text-blue-500" />
+                                <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Site Video *</span>
+                              </div>
+                            )}
+                            <input type="file" accept="video/*, image/*" capture="environment" onChange={(e) => handleFileChange(e, setTaskVideo, true)} className="hidden" />
+                          </label>
                         </div>
 
                         {/* 4. Voice Note (Optional) */}
@@ -946,7 +1006,7 @@ export default function CarpenterExecutionPage() {
                         {/* Submit Task Button */}
                         <button 
                           onClick={handleUploadTask} 
-                          disabled={submitting || !taskCategory || !taskSelfie || !taskVideo} 
+                          disabled={submitting || !taskCategory || taskProductPhotos.length < 2 || !taskVideo} 
                           className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold flex justify-center items-center gap-2 shadow-md disabled:opacity-50 transition-colors"
                         >
                           {submitting ? <Loader2 className="animate-spin" /> : <Upload size={18} />} Submit Task Update

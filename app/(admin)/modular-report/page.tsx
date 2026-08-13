@@ -118,7 +118,7 @@ function ModularAdminContent() {
   const [adminSitePhoto, setAdminSitePhoto] = useState<File | null>(null);
   
   const [adminTaskCategory, setAdminTaskCategory] = useState('');
-  const [adminTaskSelfie, setAdminTaskSelfie] = useState<File | null>(null);
+  const [adminTaskProductPhotos, setAdminTaskProductPhotos] = useState<{ file: File; preview: string }[]>([]);
   const [adminTaskVideo, setAdminTaskVideo] = useState<File | null>(null);
   const [adminTaskRemarks, setAdminTaskRemarks] = useState('');
 
@@ -458,9 +458,25 @@ function ModularAdminContent() {
     }
   };
 
+  // Multiple Product Photos Implementation
+  const handleAdminProductPhotosChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const newPhotos = Array.from(files).map((file) => ({
+      file,
+      preview: URL.createObjectURL(file)
+    }));
+    setAdminTaskProductPhotos((prev) => [...prev, ...newPhotos]);
+    e.target.value = '';
+  };
+
+  const removeAdminProductPhoto = (index: number) => {
+    setAdminTaskProductPhotos((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const submitTask = async () => {
-    if (!adminTaskCategory || !adminTaskSelfie || !adminTaskVideo) {
-      setErrorMsg('Category, Task Selfie, and Site Video are required to manually upload a task.');
+    if (!adminTaskCategory || adminTaskProductPhotos.length < 2 || !adminTaskVideo) {
+      setErrorMsg('Category, at least 2 Product Photos, and Site Video are required to manually upload a task.');
       return;
     }
     setSubmittingTask(true);
@@ -481,31 +497,34 @@ function ModularAdminContent() {
         if (newLog) logId = newLog.id;
       }
 
-      const selfieExt = adminTaskSelfie.name.split('.').pop();
-      const selfiePath = `${manageTarget.id}/admin-task-selfie-${Date.now()}.${selfieExt}`;
-      await supabase.storage.from('modular-project-docs').upload(selfiePath, adminTaskSelfie);
-      const selfieUrl = supabase.storage.from('modular-project-docs').getPublicUrl(selfiePath).data.publicUrl;
+      const productPhotoUrls: string[] = [];
+      for (const photo of adminTaskProductPhotos) {
+        const photoPath = `${manageTarget.id}/admin-task-product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+        await supabase.storage.from('modular-project-docs').upload(photoPath, photo.file);
+        const photoUrl = supabase.storage.from('modular-project-docs').getPublicUrl(photoPath).data.publicUrl;
+        productPhotoUrls.push(photoUrl);
+      }
 
       const videoExt = adminTaskVideo.name.split('.').pop();
       const videoPath = `${manageTarget.id}/admin-task-video-${Date.now()}.${videoExt}`;
       await supabase.storage.from('modular-project-docs').upload(videoPath, adminTaskVideo);
       const videoUrl = supabase.storage.from('modular-project-docs').getPublicUrl(videoPath).data.publicUrl;
 
-      const formattedRemarks = `[Uploaded by Admin] [Selfie: ${selfieUrl}] ${adminTaskRemarks.trim()}`;
+      const formattedRemarks = `[Uploaded by Admin] [ProductPhotos: ${productPhotoUrls.join('|')}] ${adminTaskRemarks.trim()}`;
 
       const { error } = await supabase.from('modular_task_updates').insert({
         project_id: manageTarget.id,
         daily_log_id: logId,
         category: adminTaskCategory,
         media_url: videoUrl,
-        media_type: 'video',
+        media_type: adminTaskVideo.type.includes('video') ? 'video' : 'image',
         remarks: formattedRemarks
       });
 
       if (error) throw error;
       showSuccess('Task uploaded successfully.');
       setAdminTaskCategory('');
-      setAdminTaskSelfie(null);
+      setAdminTaskProductPhotos([]);
       setAdminTaskVideo(null);
       setAdminTaskRemarks('');
     } catch (err: any) {
@@ -890,7 +909,7 @@ function ModularAdminContent() {
                     <StatusBadge status={project.status} />
                     {project.status !== 'submitted' && (
                       <span className={`px-2 py-1 rounded-md text-[9px] font-bold border ${getExecutorStatus(project.status).color}`}>
-                         Exec: {getExecutorStatus(project.status).label}
+                          Exec: {getExecutorStatus(project.status).label}
                       </span>
                     )}
                   </div>
@@ -1134,19 +1153,28 @@ function ModularAdminContent() {
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     {viewTasks.map(task => {
-                      const selfieMatch = task.remarks ? task.remarks.match(/\[Selfie:\s*(.*?)\]/) : null;
-                      const taskSelfieUrl = selfieMatch ? selfieMatch[1] : null;
-                      const cleanRemarks = task.remarks ? task.remarks.replace(/\[Selfie:\s*.*?\]\s*/g, '').trim() : 'No remarks';
+                      // Prefer the new multi-photo "ProductPhotos" format written by the
+                      // carpenter execution page; fall back to the older single-photo
+                      // "Selfie" format (still used by the admin's own manual task
+                      // upload above, and by any tasks submitted before this change).
+                      const productPhotosMatch = task.remarks ? task.remarks.match(/\[ProductPhotos:\s*(.*?)\]/) : null;
+                      const legacySelfieMatch = task.remarks ? task.remarks.match(/\[Selfie:\s*(.*?)\]/) : null;
+                      const taskPhotoUrls = productPhotosMatch
+                        ? productPhotosMatch[1].split('|').filter(Boolean)
+                        : (legacySelfieMatch ? [legacySelfieMatch[1]] : []);
+                      const cleanRemarks = task.remarks
+                        ? task.remarks.replace(/\[ProductPhotos:\s*.*?\]\s*/g, '').replace(/\[Selfie:\s*.*?\]\s*/g, '').trim()
+                        : 'No remarks';
 
                       return (
                         <div key={task.id} className="flex gap-4 border border-gray-100 rounded-xl p-3 bg-gray-50/50 hover:bg-gray-50 transition-colors">
-                           <div className="flex gap-1.5 shrink-0">
-                             {taskSelfieUrl && (
-                               <a href={taskSelfieUrl} target="_blank" rel="noopener noreferrer" className="block w-14 h-14 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-90 transition-opacity">
-                                 <img src={taskSelfieUrl} alt="Selfie" className="w-full h-full object-cover" />
-                                 <div className="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-[8px] text-white text-center font-bold py-[1px]">Selfie</div>
+                           <div className="flex gap-1.5 shrink-0 flex-wrap max-w-[6.5rem]">
+                             {taskPhotoUrls.map((url: string, idx: number) => (
+                               <a key={idx} href={url} target="_blank" rel="noopener noreferrer" className="block w-14 h-14 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-90 transition-opacity">
+                                 <img src={url} alt={`Product ${idx + 1}`} className="w-full h-full object-cover" />
+                                 <div className="absolute bottom-0 inset-x-0 bg-black/60 backdrop-blur-sm text-[8px] text-white text-center font-bold py-[1px]">Photo</div>
                                </a>
-                             )}
+                             ))}
                              {task.media_url && (
                                <a href={task.media_url} target="_blank" rel="noopener noreferrer" className="block w-14 h-14 rounded-lg overflow-hidden border border-gray-200 bg-black relative hover:opacity-90 transition-opacity">
                                   {task.media_type === 'video' ? (
@@ -1445,41 +1473,53 @@ function ModularAdminContent() {
                    </div>
                    
                    <div>
-                      <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Task Media (Selfie & Video) *</label>
-                      <div className="grid grid-cols-2 gap-3 h-28">
-                        {/* Task Selfie */}
-                        <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
-                          {adminTaskSelfie ? (
-                            <img src={URL.createObjectURL(adminTaskSelfie)} alt="Selfie Preview" className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="flex flex-col items-center justify-center gap-1">
-                              <Camera size={20} className="text-gray-400 group-hover:text-blue-500" />
-                              <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Worker Selfie</span>
-                            </div>
-                          )}
-                          <input type="file" accept="image/*" onChange={e => setAdminTaskSelfie(e.target.files?.[0] || null)} className="hidden" />
-                        </label>
+                     <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">
+                       Product Photos (Min 2) * {adminTaskProductPhotos.length > 0 && `— ${adminTaskProductPhotos.length} selected`}
+                     </label>
+                     <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                       {adminTaskProductPhotos.map((photo, idx) => (
+                         <div key={idx} className="relative w-full aspect-square rounded-xl overflow-hidden border border-gray-200">
+                           <img src={photo.preview} alt={`Product ${idx + 1}`} className="w-full h-full object-cover" />
+                           <button
+                             type="button"
+                             onClick={() => removeAdminProductPhoto(idx)}
+                             className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-red-500 transition-colors"
+                           >
+                             <X size={12} />
+                           </button>
+                         </div>
+                       ))}
+                       <label className="relative border-2 border-dashed border-gray-300 rounded-xl aspect-square flex flex-col items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors group">
+                         <Camera size={18} className="text-gray-400 group-hover:text-blue-500 mb-1" />
+                         <span className="text-[9px] font-bold text-gray-500 group-hover:text-blue-600 text-center px-1">Add Product Photos</span>
+                         <input type="file" accept="image/*" multiple onChange={handleAdminProductPhotosChange} className="hidden" />
+                       </label>
+                     </div>
+                     {adminTaskProductPhotos.length > 0 && adminTaskProductPhotos.length < 2 && (
+                       <p className="text-[10px] text-red-400 font-bold mt-1.5">At least 2 photos required</p>
+                     )}
+                   </div>
 
-                        {/* Task Video/Site Photo */}
-                        <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
-                          {adminTaskVideo ? (
-                            adminTaskVideo.type.includes('video') ? (
-                              <div className="flex flex-col items-center justify-center bg-gray-100 w-full h-full">
-                                <Play size={24} className="text-blue-500 mb-1 fill-blue-500" />
-                                <span className="text-[10px] font-bold text-gray-600">Video Selected</span>
-                              </div>
-                            ) : (
-                              <img src={URL.createObjectURL(adminTaskVideo)} alt="Site Preview" className="w-full h-full object-cover" />
-                            )
-                          ) : (
-                            <div className="flex flex-col items-center justify-center gap-1">
-                              <Video size={20} className="text-gray-400 group-hover:text-blue-500" />
-                              <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Site Video</span>
-                            </div>
-                          )}
-                          <input type="file" accept="video/*, image/*" onChange={e => setAdminTaskVideo(e.target.files?.[0] || null)} className="hidden" />
-                        </label>
-                      </div>
+                   <div>
+                     <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Site Video *</label>
+                     <label className="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 h-28 flex items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-50/50 transition-colors overflow-hidden group">
+                       {adminTaskVideo ? (
+                         adminTaskVideo.type.includes('video') ? (
+                           <div className="flex flex-col items-center justify-center bg-gray-100 w-full h-full">
+                             <Play size={24} className="text-blue-500 mb-1 fill-blue-500" />
+                             <span className="text-[10px] font-bold text-gray-600">Video Selected</span>
+                           </div>
+                         ) : (
+                           <img src={URL.createObjectURL(adminTaskVideo)} alt="Site Preview" className="w-full h-full object-cover" />
+                         )
+                       ) : (
+                         <div className="flex flex-col items-center justify-center gap-1">
+                           <Video size={20} className="text-gray-400 group-hover:text-blue-500" />
+                           <span className="text-[10px] font-bold text-gray-500 group-hover:text-blue-600">Site Video</span>
+                         </div>
+                       )}
+                       <input type="file" accept="video/*, image/*" onChange={e => setAdminTaskVideo(e.target.files?.[0] || null)} className="hidden" />
+                     </label>
                    </div>
 
                    <div>
@@ -1496,7 +1536,7 @@ function ModularAdminContent() {
                  
                  <button
                    onClick={submitTask}
-                   disabled={submittingTask || !adminTaskCategory || !adminTaskSelfie || !adminTaskVideo}
+                   disabled={submittingTask || !adminTaskCategory || adminTaskProductPhotos.length < 2 || !adminTaskVideo}
                    className="w-full py-3 rounded-xl text-white text-sm font-bold bg-blue-600 hover:bg-blue-700 transition disabled:opacity-60 flex items-center justify-center gap-2"
                  >
                    {submittingTask ? (<><Loader2 size={16} className="animate-spin" /> Uploading Task…</>) : (<><UploadCloud size={16} /> Submit Task Update</>)}
