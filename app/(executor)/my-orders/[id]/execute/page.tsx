@@ -539,6 +539,14 @@ export default function JobExecutionPage() {
   const [previewLocLoading, setPreviewLocLoading] = useState(false);
   const [sigPreviewUrl, setSigPreviewUrl] = useState('');
 
+  /* ── End-of-Job Attendance Selfie (mandatory to close out & stop timer) ── */
+const [endSelfieModalOpen, setEndSelfieModalOpen] = useState(false);
+const [endSelfiePreview, setEndSelfiePreview] = useState<string | null>(null);
+const [endSelfieFile, setEndSelfieFile] = useState<File | null>(null);
+const [endSelfieError, setEndSelfieError] = useState('');
+const [uploadingEndSelfie, setUploadingEndSelfie] = useState(false);
+const endSelfieInputRef = useRef<HTMLInputElement | null>(null);
+
   /* ── Location name for completed dashboard ── */
   const [locationName, setLocationName] = useState('');
 
@@ -918,7 +926,7 @@ export default function JobExecutionPage() {
   };
 
   /* ── Actual submission (after confirm) ── */
-  const executeSubmit = async () => {
+  const executeSubmit = async (endSelfieUrl: string | null = null) => {
     setConfirmModalOpen(false);
     setSubmitting(true); setUploadStage('Uploading signature...');
     try {
@@ -959,13 +967,14 @@ export default function JobExecutionPage() {
       ].filter(Boolean).join('\n\n');
 
       const { data: exD, error: exE } = await supabase.from('job_execution').update({
-        before_photos: bUrls, after_photos: aUrls, signature_url: sigUrl,
-        signature_timestamp: finishedAt.toISOString(), signature_latitude: loc?.lat ?? null, signature_longitude: loc?.lng ?? null,
-        end_time: finishedAt.toISOString(), execution_notes: finalCombinedNotes || null,
-        progress_updates: progressUpdates.length > 0 ? progressUpdates : null,
-        reported_issues: issueReportsPayload.length > 0 ? issueReportsPayload : null,
-        total_paused_ms: totalPausedMs, actual_worked_ms: workedMs, is_paused: false,
-      }).eq('order_id', orderId).select().single();
+  before_photos: bUrls, after_photos: aUrls, signature_url: sigUrl,
+  signature_timestamp: finishedAt.toISOString(), signature_latitude: loc?.lat ?? null, signature_longitude: loc?.lng ?? null,
+  end_time: finishedAt.toISOString(), execution_notes: finalCombinedNotes || null,
+  progress_updates: progressUpdates.length > 0 ? progressUpdates : null,
+  reported_issues: issueReportsPayload.length > 0 ? issueReportsPayload : null,
+  total_paused_ms: totalPausedMs, actual_worked_ms: workedMs, is_paused: false,
+  end_selfie_url: endSelfieUrl,
+}).eq('order_id', orderId).select().single();
       if (exE) throw new Error(exE.message);
 
       const { error: stE } = await supabase.from('orders').update({ status: 'completed' }).eq('id', orderId);
@@ -977,6 +986,64 @@ export default function JobExecutionPage() {
       setOrder((pr: any) => ({ ...pr, status: 'completed' })); stopGps();
     } catch (err: any) { setActionError(err.message || 'Could not complete job.'); } finally { setUploadStage(''); setSubmitting(false); }
   };
+
+  /* ── End Selfie Handlers ── */
+const handleEndSelfieFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  setEndSelfieError('');
+  setEndSelfieFile(file);
+  const reader = new FileReader();
+  reader.onload = () => setEndSelfiePreview(reader.result as string);
+  reader.readAsDataURL(file);
+};
+
+const retakeEndSelfie = () => {
+  setEndSelfiePreview(null);
+  setEndSelfieFile(null);
+  setEndSelfieError('');
+  if (endSelfieInputRef.current) endSelfieInputRef.current.value = '';
+};
+
+const closeEndSelfieModal = () => {
+  if (uploadingEndSelfie) return;
+  setEndSelfieModalOpen(false);
+  setEndSelfiePreview(null);
+  setEndSelfieFile(null);
+  setEndSelfieError('');
+};
+
+const confirmEndSelfieAndSubmit = async () => {
+  if (!endSelfieFile) {
+    setEndSelfieError('Please take a selfie to continue — it is required to close attendance for this job.');
+    return;
+  }
+  setUploadingEndSelfie(true);
+  setEndSelfieError('');
+  try {
+    const ext = endSelfieFile.name.split('.').pop() || 'jpg';
+    const path = `${orderId}/attendance-selfies/end-${Date.now()}.${ext}`;
+    const { error: uploadErr } = await supabase.storage.from('job-proofs').upload(path, endSelfieFile);
+    if (uploadErr) {
+      setEndSelfieError(`Selfie upload failed: ${uploadErr.message}`);
+      setUploadingEndSelfie(false);
+      return;
+    }
+    const { data: urlData } = supabase.storage.from('job-proofs').getPublicUrl(path);
+    const endSelfieUrl = urlData?.publicUrl || null;
+
+    setUploadingEndSelfie(false);
+    setEndSelfieModalOpen(false);
+    setEndSelfiePreview(null);
+    setEndSelfieFile(null);
+
+    await executeSubmit(endSelfieUrl);
+  } catch (err: any) {
+    console.error('Error during end-selfie submit flow:', err);
+    setEndSelfieError('Something went wrong. Please try again.');
+    setUploadingEndSelfie(false);
+  }
+};
 
   /* ─── Gate Renders ──────────────────────────────────────────────────────── */
   if (loading) return (
@@ -1702,17 +1769,96 @@ export default function JobExecutionPage() {
                 Go Back & Edit
               </button>
               <button
-                onClick={executeSubmit}
-                disabled={submitting}
-                className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-white bg-green-600 hover:bg-green-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-lg"
-              >
-                {submitting ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
-                Confirm & Submit
-              </button>
+  onClick={() => setEndSelfieModalOpen(true)}
+  disabled={submitting}
+  className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-white bg-green-600 hover:bg-green-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2 shadow-lg"
+>
+  {submitting ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+  Confirm & Submit
+</button>
             </div>
           </div>
         </div>
       )}
+
+      {/* ═══════════════ END-OF-JOB ATTENDANCE SELFIE (mandatory) ═══════════════ */}
+{endSelfieModalOpen && (
+  <div className="fixed inset-0 z-[160] bg-black/50 backdrop-blur-sm flex items-center justify-center px-4">
+    <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5 sm:p-6">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-base sm:text-lg font-black text-gray-900 flex items-center gap-2">
+          <Camera size={20} className="text-[#8ED26B]" /> Selfie Required
+        </h3>
+        <button
+          onClick={closeEndSelfieModal}
+          disabled={uploadingEndSelfie}
+          className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 disabled:opacity-40"
+        >
+          <X size={18} />
+        </button>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        A selfie is mandatory to close attendance for this job. The job won't be marked complete without it.
+      </p>
+
+      <input
+        ref={endSelfieInputRef}
+        type="file"
+        accept="image/*"
+        capture="user"
+        onChange={handleEndSelfieFileChange}
+        className="hidden"
+        id="end-selfie-input"
+      />
+
+      {!endSelfiePreview ? (
+        <label
+          htmlFor="end-selfie-input"
+          className="flex flex-col items-center justify-center gap-2 w-full h-48 rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 hover:bg-gray-100 cursor-pointer transition-colors"
+        >
+          <Camera size={32} className="text-gray-300" />
+          <span className="text-sm font-bold text-gray-500">Tap to take a selfie</span>
+        </label>
+      ) : (
+        <div className="relative w-full h-48 rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+          <img src={endSelfiePreview} alt="Selfie preview" className="w-full h-full object-cover" />
+          <button
+            onClick={retakeEndSelfie}
+            disabled={uploadingEndSelfie}
+            className="absolute bottom-2 right-2 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-gray-700 bg-white/90 border border-gray-200 shadow-sm hover:bg-white transition-colors disabled:opacity-50"
+          >
+            <RotateCcw size={13} /> Retake
+          </button>
+        </div>
+      )}
+
+      {endSelfieError && (
+        <p className="text-xs font-semibold text-red-500 mt-3 flex items-center gap-1.5">
+          <AlertTriangle size={14} className="shrink-0" /> {endSelfieError}
+        </p>
+      )}
+
+      <div className="flex gap-3 mt-5">
+        <button
+          onClick={closeEndSelfieModal}
+          disabled={uploadingEndSelfie}
+          className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-gray-600 bg-gray-50 border border-gray-200 hover:bg-gray-100 transition-colors disabled:opacity-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={confirmEndSelfieAndSubmit}
+          disabled={uploadingEndSelfie || !endSelfieFile}
+          className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-white shadow-sm transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+          style={{ backgroundColor: '#8ED26B' }}
+        >
+          {uploadingEndSelfie ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+          {uploadingEndSelfie ? 'Closing...' : 'Confirm & Close Job'}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
 
       {/* Camera Modal */}
       <CameraModal open={camOpen} onClose={() => setCamOpen(false)} onCapture={handleCamCapture} />

@@ -6,7 +6,7 @@ import { createClient } from '@/app/utils/supabase/client';
 import {
   ArrowLeft, Loader2, Camera, MapPin, Mic, Square, Play, 
   CheckCircle2, LogOut, PenLine, Clock, Upload, Hammer, 
-  Flag, AlertTriangle, User, RotateCcw, X, Info, Video, FileText, ArrowRight, Settings
+  Flag, AlertTriangle, User, RotateCcw, X, Info, Video, FileText, Settings
 } from 'lucide-react';
 
 const TASK_STEPS = [
@@ -44,14 +44,22 @@ export default function CarpenterExecutionPage() {
   const [selfie, setSelfie] = useState<{ file: File; preview: string } | null>(null);
   const [sitePhoto, setSitePhoto] = useState<{ file: File; preview: string } | null>(null);
 
+  // ── End Shift Selfie (mandatory before clock-out can complete) ──
+  const [endSelfieModalOpen, setEndSelfieModalOpen] = useState(false);
+  const [endSelfiePreview, setEndSelfiePreview] = useState<string | null>(null);
+  const [endSelfieFile, setEndSelfieFile] = useState<File | null>(null);
+  const [endSelfieError, setEndSelfieError] = useState('');
+  const [uploadingEndSelfie, setUploadingEndSelfie] = useState(false);
+  const endSelfieInputRef = useRef<HTMLInputElement | null>(null);
+
   // ── Task Update States ──
   const [taskCategory, setTaskCategory] = useState('');
-  // Product Photo(s) — mandatory minimum 2, gallery multi-select, unlimited additional uploads
+  // Product Photo(s) — mandatory minimum 2, gallery multi-select
   const [taskProductPhotos, setTaskProductPhotos] = useState<{ file: File; preview: string }[]>([]);
   const [taskVideo, setTaskVideo] = useState<{ file: File; preview: string } | null>(null);
   const [remarks, setRemarks] = useState('');
   
-  // ── Voice Recorder States (Optional Now) ──
+  // ── Voice Recorder States (Optional) ──
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -99,7 +107,6 @@ export default function CarpenterExecutionPage() {
       .order('created_at', { ascending: false });
     setCompletedTasks(tasks || []);
 
-    // Also checking 'sign_off' here just in case older jobs still have it
     if (proj.status === 'completed' || proj.status === 'sign_off') {
       const { data: logs } = await supabase
         .from('modular_daily_logs')
@@ -224,36 +231,180 @@ export default function CarpenterExecutionPage() {
   };
 
   // ==========================================
-  // 2. END OF DAY
+  // 2. TRIGGER END OF DAY
   // ==========================================
   const triggerEndDay = () => {
     setConfirmPrompt({
       title: "End Shift",
       message: "Are you sure you want to clock out and end your work day?",
-      onConfirm: handleEndDay
+      onConfirm: () => {
+        setEndSelfieError('');
+        setEndSelfiePreview(null);
+        setEndSelfieFile(null);
+        setEndSelfieModalOpen(true);
+      }
     });
   };
 
-  const handleEndDay = async () => {
-    if (!dailyLog) return;
+  const closeEndSelfieModal = () => {
+    if (uploadingEndSelfie) return;
+    setEndSelfieModalOpen(false);
+    setEndSelfiePreview(null);
+    setEndSelfieFile(null);
+    setEndSelfieError('');
+  };
+
+  const handleEndSelfieFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setEndSelfieError('');
+    setEndSelfieFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setEndSelfiePreview(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  const retakeEndSelfie = () => {
+    setEndSelfiePreview(null);
+    setEndSelfieFile(null);
+    setEndSelfieError('');
+    if (endSelfieInputRef.current) endSelfieInputRef.current.value = '';
+  };
+
+  // ==========================================
+  // 3. UPLOAD SELFIE -> THEN HANDLE END DAY
+  // ==========================================
+  const confirmEndSelfieAndEndDay = async () => {
+    if (!endSelfieFile) {
+      setEndSelfieError('Please take a selfie to continue — it is required to end your shift.');
+      return;
+    }
+
+    setUploadingEndSelfie(true);
+    setEndSelfieError('');
+
+    try {
+      const ext = endSelfieFile.name.split('.').pop() || 'jpg';
+      const path = `${projectId}/end-shift-selfies/${Date.now()}.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from('modular-project-docs')
+        .upload(path, endSelfieFile);
+
+      if (uploadErr) {
+        setEndSelfieError(`Selfie upload failed: ${uploadErr.message}`);
+        setUploadingEndSelfie(false);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage.from('modular-project-docs').getPublicUrl(path);
+      const endSelfieUrl = urlData?.publicUrl || null;
+
+      setUploadingEndSelfie(false);
+      setEndSelfieModalOpen(false);
+      setEndSelfiePreview(null);
+      setEndSelfieFile(null);
+
+      await handleEndDay(endSelfieUrl);
+    } catch (err: any) {
+      console.error('Error during end-selfie clock-out flow:', err);
+      setEndSelfieError('Something went wrong. Please try again.');
+      setUploadingEndSelfie(false);
+    }
+  };
+
+  // ==========================================
+  // COMBINED END DAY & PROJECT COMPLETION LOGIC
+  // ==========================================
+  const handleEndDay = async (endSelfieUrl: string | null) => {
     setSubmitting(true);
     
     try {
       const now = new Date().toISOString();
-      await supabase
-        .from('modular_daily_logs')
-        .update({ check_out_time: now })
-        .eq('id', dailyLog.id);
+
+      // PART A: Always end their shift in the DB
+      // (Notice we removed setDailyLog(null) from here so the UI doesn't glitch!)
+      if (dailyLog) {
+        await supabase
+          .from('modular_daily_logs')
+          .update({ check_out_time: now, check_out_selfie_url: endSelfieUrl })
+          .eq('id', dailyLog.id);
+          
+        if (timerRef.current) clearInterval(timerRef.current);
+      }
+
+      // PART B: If they are also completing the job, save signatures!
+      if (showSignOff) {
+        const c = sigCanvasRef.current; 
+        if (!c) throw new Error('Signature missing.');
+        const blob: Blob | null = await new Promise((r) => c.toBlob((b) => r(b), 'image/png'));
+        if (!blob) throw new Error('Could not read signature.');
         
-      if (timerRef.current) clearInterval(timerRef.current);
-      setDailyLog(null);
-      
-      setAlertPrompt({
-        title: "Shift Ended",
-        message: "Your work hours have been recorded successfully. Great job today!",
-        type: 'success',
-        onClose: () => router.push('/my-orders')
-      });
+        const sigPath = `${projectId}/pm-signature-${Date.now()}.png`;
+        await supabase.storage.from('modular-project-docs').upload(sigPath, blob, { contentType: 'image/png' });
+        const sigUrl = supabase.storage.from('modular-project-docs').getPublicUrl(sigPath).data.publicUrl;
+
+        let custSigUrl = null;
+        if (hasCustSig && custSigCanvasRef.current) {
+          const custBlob: Blob | null = await new Promise((r) => custSigCanvasRef.current!.toBlob((b) => r(b), 'image/png'));
+          if (custBlob) {
+            const custSigPath = `${projectId}/customer-signature-${Date.now()}.png`;
+            await supabase.storage.from('modular-project-docs').upload(custSigPath, custBlob, { contentType: 'image/png' });
+            custSigUrl = supabase.storage.from('modular-project-docs').getPublicUrl(custSigPath).data.publicUrl;
+          }
+        }
+
+        // Complete the Project in Database
+        await supabase.from('modular_projects').update({
+          status: 'completed', 
+          pm_name: pmName.trim(),
+          pm_signature_url: sigUrl,
+          customer_ack_signature_url: custSigUrl,
+          updated_at: now
+        }).eq('id', projectId);
+        
+        // Notify Admin via API
+        try {
+          await fetch('/api/notify-job-complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectId })
+          });
+        } catch (err) {
+          console.error("Failed to notify final completion", err);
+        }
+
+        // Refresh logs so the final checkout selfie displays instantly
+        const { data: logs } = await supabase
+          .from('modular_daily_logs')
+          .select('*')
+          .eq('project_id', projectId)
+          .order('log_date', { ascending: false });
+        setCompletedLogs(logs || []);
+
+        // UPDATE ALL STATES AT ONCE HERE to prevent the 3-second UI glitch
+        setProject({ ...project, status: 'completed' });
+        setShowSignOff(false);
+        setDailyLog(null); 
+
+        setAlertPrompt({
+          title: "Job & Shift Completed!",
+          message: "The final sign-offs and your check-out selfie have been submitted. This project is now closed.",
+          type: 'success',
+          onClose: () => router.push('/my-orders')
+        });
+
+      } else {
+        // If they just clicked "End Shift" normally (without completing the project)
+        setDailyLog(null); 
+        
+        setAlertPrompt({
+          title: "Shift Ended",
+          message: "Your work hours have been recorded successfully. Great job today!",
+          type: 'success',
+          onClose: () => router.push('/my-orders')
+        });
+      }
 
     } catch (error: any) {
       setActionError(error.message || "Failed to end day.");
@@ -263,7 +414,7 @@ export default function CarpenterExecutionPage() {
   };
 
   // ==========================================
-  // 3. VOICE RECORDING (OPTIONAL)
+  // VOICE RECORDING 
   // ==========================================
   const startRecording = async () => {
     try {
@@ -296,12 +447,6 @@ export default function CarpenterExecutionPage() {
     setAudioUrl(null);
   };
 
-  // ==========================================
-  // TASK CATEGORY CHANGE (BUG FIX)
-  // Switching category before submitting must clear any photos/video/
-  // voice-note/remarks already staged for the previous category, so they
-  // don't silently carry over into the newly selected task.
-  // ==========================================
   const handleCategoryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCategory = e.target.value;
     if (newCategory !== taskCategory) {
@@ -313,9 +458,6 @@ export default function CarpenterExecutionPage() {
     setTaskCategory(newCategory);
   };
 
-  // ==========================================
-  // PRODUCT PHOTOS (multi-select from gallery, mandatory minimum 2)
-  // ==========================================
   const handleProductPhotosChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -324,7 +466,6 @@ export default function CarpenterExecutionPage() {
       preview: URL.createObjectURL(file)
     }));
     setTaskProductPhotos((prev) => [...prev, ...newPhotos]);
-    // reset the input so selecting the same file(s) again later still fires onChange
     e.target.value = '';
   };
 
@@ -333,7 +474,7 @@ export default function CarpenterExecutionPage() {
   };
 
   // ==========================================
-  // 4. SUBMIT TASK UPDATE
+  // SUBMIT TASK UPDATE
   // ==========================================
   const handleUploadTask = async () => {
     if (!taskCategory || taskProductPhotos.length < 2 || !taskVideo) {
@@ -378,7 +519,6 @@ export default function CarpenterExecutionPage() {
 
       if (error) throw error;
 
-      // Smart 4th Task Prompt Logic
       const newCategories = new Set([...completedCategories, taskCategory]);
       const coreTasks = ['Site Preparation', 'Kitchen Carcass Installation', 'Furniture Installation', 'Wall Panels'];
       const hasAllCore = coreTasks.every(c => newCategories.has(c));
@@ -420,59 +560,34 @@ export default function CarpenterExecutionPage() {
   const triggerCompleteJob = () => {
     setConfirmPrompt({
       title: "Complete Job",
-      message: "Are you sure you completely finished this job? This will open the final sign-off form below.",
+      message: "Are you sure you completely finished this job? This will open the final sign-off form.",
       onConfirm: () => {
         setShowSignOff(true);
-        setTimeout(() => {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        }, 100);
+        setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 100);
       }
     });
   };
 
   // ==========================================
-  // 5. KITCHEN CARCASS -> COUNTERTOP TRIGGER
+  // FINAL PROJECT MANAGER SIGN OFF
   // ==========================================
-  const triggerHandover = () => {
-    setConfirmPrompt({
-      title: "Handover to Countertop",
-      message: "Notify admin that the Kitchen Carcass is ready for countertops? You can still log other tasks while waiting.",
-      onConfirm: handleHandoverCountertop
-    });
-  };
-
-  const handleHandoverCountertop = async () => {
-    setSubmitting(true);
-    try {
-      await supabase.from('modular_projects').update({ status: 'awaiting_countertop' }).eq('id', projectId);
-      setProject({ ...project, status: 'awaiting_countertop' });
-      
-      // Notify Admin Only via API
-      try {
-        await fetch('/api/notify-admin-countertop', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId, jobId: project.job_id })
-        });
-      } catch (err) {
-        console.error("Failed to notify admin", err);
-      }
-      
-      setAlertPrompt({
-        title: "Notified Admin",
-        message: "Admin has been notified. You can continue working on other tasks in the meantime.",
-        type: 'info'
-      });
-
-    } catch (error: any) {
-      setActionError(error.message);
-    } finally {
-      setSubmitting(false);
+  const handleFinalSignOffComplete = async () => {
+    // 1. Validate form completely before showing selfie screen
+    if (!pmName.trim() || !hasSig) {
+      setActionError("Project Manager Name and Signature are required before completing.");
+      return;
     }
+    
+    // 2. Clear any errors and instantly trigger the End Shift Selfie requirement
+    setActionError('');
+    setEndSelfieError('');
+    setEndSelfiePreview(null);
+    setEndSelfieFile(null);
+    setEndSelfieModalOpen(true);
   };
 
   // ==========================================
-  // 6. FINAL SIGN OFF 
+  // CANVAS DRAWING LOGIC (PM & Customer)
   // ==========================================
   const getPtr = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = sigCanvasRef.current; if (!c) return { x: 0, y: 0 };
@@ -494,71 +609,40 @@ export default function CarpenterExecutionPage() {
   const onCustUp = (e: React.PointerEvent<HTMLCanvasElement>) => { if (!isCustDrawing.current) return; isCustDrawing.current = false; setHasCustSig(true); try { (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ } };
   const clearCustSig = () => { const c = custSigCanvasRef.current; const ctx = c?.getContext('2d'); if (c && ctx) { ctx.clearRect(0, 0, c.width, c.height); ctx.beginPath(); } setHasCustSig(false); };
 
-  const handleFinalSignOffComplete = async () => {
-    if (!pmName.trim() || !hasSig) {
-      setActionError("Project Manager Name and Signature are required before completing.");
-      return;
-    }
-    
+  const handleHandoverCountertop = async () => {
     setSubmitting(true);
-    setActionError('');
-    
     try {
-      const c = sigCanvasRef.current; 
-      if (!c) throw new Error('Signature missing.');
-      const blob: Blob | null = await new Promise((r) => c.toBlob((b) => r(b), 'image/png'));
-      if (!blob) throw new Error('Could not read signature.');
+      await supabase.from('modular_projects').update({ status: 'awaiting_countertop' }).eq('id', projectId);
+      setProject({ ...project, status: 'awaiting_countertop' });
       
-      const sigPath = `${projectId}/pm-signature-${Date.now()}.png`;
-      await supabase.storage.from('modular-project-docs').upload(sigPath, blob, { contentType: 'image/png' });
-      const sigUrl = supabase.storage.from('modular-project-docs').getPublicUrl(sigPath).data.publicUrl;
-
-      let custSigUrl = null;
-      if (hasCustSig && custSigCanvasRef.current) {
-        const custBlob: Blob | null = await new Promise((r) => custSigCanvasRef.current!.toBlob((b) => r(b), 'image/png'));
-        if (custBlob) {
-          const custSigPath = `${projectId}/customer-signature-${Date.now()}.png`;
-          await supabase.storage.from('modular-project-docs').upload(custSigPath, custBlob, { contentType: 'image/png' });
-          custSigUrl = supabase.storage.from('modular-project-docs').getPublicUrl(custSigPath).data.publicUrl;
-        }
-      }
-
-      // Automatically sets status completely to 'completed', bypassing 'sign_off'
-      await supabase.from('modular_projects').update({
-        status: 'completed', 
-        pm_name: pmName.trim(),
-        pm_signature_url: sigUrl,
-        customer_ack_signature_url: custSigUrl,
-        updated_at: new Date().toISOString()
-      }).eq('id', projectId);
-      
-      // Send Email to Admin & Client
       try {
-        await fetch('/api/notify-job-complete', {
+        await fetch('/api/notify-admin-countertop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId })
+          body: JSON.stringify({ projectId, jobId: project.job_id })
         });
       } catch (err) {
-        console.error("Failed to notify final completion", err);
+        console.error("Failed to notify admin", err);
       }
-
-      // Ensure the UI instantly reflects 'completed'
-      setProject({ ...project, status: 'completed' });
-      setShowSignOff(false);
-
+      
       setAlertPrompt({
-        title: "Job Completed!",
-        message: "The final sign-offs have been submitted successfully. This project is now closed.",
-        type: 'success',
-        onClose: () => router.push('/my-orders')
+        title: "Notified Admin",
+        message: "Admin has been notified. You can continue working on other tasks in the meantime.",
+        type: 'info'
       });
-
     } catch (error: any) {
       setActionError(error.message);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const triggerHandover = () => {
+    setConfirmPrompt({
+      title: "Handover to Countertop",
+      message: "Notify admin that the Kitchen Carcass is ready for countertops? You can still log other tasks while waiting.",
+      onConfirm: handleHandoverCountertop
+    });
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, setter: any, checkVideo: boolean = false) => {
@@ -614,7 +698,6 @@ export default function CarpenterExecutionPage() {
 
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
 
-        {/* ── MAGIC NOTIFICATION: ADMIN VERIFIED COUNTERTOP ── */}
         {status === 'countertop_completed' && !showSignOff && (
           <div className="bg-gradient-to-r from-blue-500 to-indigo-500 p-[2px] rounded-2xl shadow-lg mb-6 animate-in slide-in-from-top fade-in duration-500">
             <div className="bg-white/95 backdrop-blur rounded-xl px-5 py-4 flex items-center gap-4">
@@ -646,7 +729,7 @@ export default function CarpenterExecutionPage() {
                 <CheckCircle2 size={32} className="text-green-500" />
               </div>
               <h2 className="text-xl sm:text-2xl font-black text-gray-900 mb-2">Job Completed Successfully</h2>
-              <p className="text-sm text-gray-500 mb-8 max-w-md mx-auto leading-relaxed">Excellent work! All tasks and final sign-offs have been submitted and the job is officially closed.</p>
+              <p className="text-sm text-gray-500 mb-8 max-w-md mx-auto leading-relaxed">Excellent work! All tasks, final sign-offs, and checkout procedures have been completed.</p>
               <button 
                 onClick={() => router.push('/my-orders')} 
                 className="inline-flex items-center justify-center gap-2 px-8 py-3.5 bg-gray-900 text-white rounded-xl text-sm font-bold shadow-md hover:bg-black transition-all hover:-translate-y-0.5"
@@ -681,7 +764,7 @@ export default function CarpenterExecutionPage() {
             {completedLogs.length > 0 && (
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-sm">
                 <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-5 flex items-center gap-2">
-                  <MapPin size={14} className="text-[#8ED26B]" /> Morning Check-ins ({completedLogs.length})
+                  <MapPin size={14} className="text-[#8ED26B]" /> Daily Logs & Check-ins ({completedLogs.length})
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {completedLogs.map((log) => (
@@ -691,7 +774,7 @@ export default function CarpenterExecutionPage() {
                         <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5"><Clock size={12} className="text-green-500"/> In: {formatTime(log.check_in_time)}</p>
                         <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5 mt-0.5"><Clock size={12} className="text-amber-500"/> Out: {log.check_out_time ? formatTime(log.check_out_time) : '—'}</p>
                       </div>
-                      <div className="flex gap-2 shrink-0">
+                      <div className="flex gap-2 shrink-0 flex-wrap justify-end max-w-[7.5rem]">
                         {log.selfie_url && (
                           <a href={log.selfie_url} target="_blank" className="w-14 h-14 rounded-lg bg-black overflow-hidden relative block border border-gray-200 shadow-sm hover:opacity-80 transition-opacity">
                              <img src={log.selfie_url} alt="Selfie" className="w-full h-full object-cover opacity-90" />
@@ -702,6 +785,12 @@ export default function CarpenterExecutionPage() {
                           <a href={log.site_photo_url} target="_blank" className="w-14 h-14 rounded-lg bg-black overflow-hidden relative block border border-gray-200 shadow-sm hover:opacity-80 transition-opacity">
                              <img src={log.site_photo_url} alt="Site" className="w-full h-full object-cover opacity-90" />
                              <span className="absolute bottom-0 w-full text-center bg-black/60 backdrop-blur-sm text-[8px] text-white font-bold py-0.5">Site</span>
+                          </a>
+                        )}
+                        {log.check_out_selfie_url && (
+                          <a href={log.check_out_selfie_url} target="_blank" className="w-14 h-14 rounded-lg bg-black overflow-hidden relative block border border-gray-200 shadow-sm hover:opacity-80 transition-opacity">
+                             <img src={log.check_out_selfie_url} alt="Check-out selfie" className="w-full h-full object-cover opacity-90" />
+                             <span className="absolute bottom-0 w-full text-center bg-black/60 backdrop-blur-sm text-[8px] text-white font-bold py-0.5">Out</span>
                           </a>
                         )}
                       </div>
@@ -718,8 +807,6 @@ export default function CarpenterExecutionPage() {
                 </h3>
                 <div className="space-y-4">
                   {completedTasks.map((task) => {
-                    // Prefer the new multi-photo format; fall back to the old single-selfie
-                    // format so previously submitted tasks still render correctly.
                     const productPhotosMatch = task.remarks ? task.remarks.match(/\[ProductPhotos:\s*(.*?)\]/) : null;
                     const legacySelfieMatch = task.remarks ? task.remarks.match(/\[Selfie:\s*(.*?)\]/) : null;
                     const productPhotoUrls = productPhotosMatch
@@ -913,7 +1000,7 @@ export default function CarpenterExecutionPage() {
                           </select>
                         </div>
 
-                        {/* 2. Product Photos (min 2, gallery multi-select, unlimited) */}
+                        {/* 2. Product Photos */}
                         <div>
                           <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">
                             2. Product Photos (Min 2) * {taskProductPhotos.length > 0 && `— ${taskProductPhotos.length} selected`}
@@ -961,7 +1048,7 @@ export default function CarpenterExecutionPage() {
                           </label>
                         </div>
 
-                        {/* 4. Voice Note (Optional) */}
+                        {/* 4. Voice Note */}
                         <div>
                           <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">4. Voice Note (Optional)</label>
                           <div className="h-20">
@@ -1003,7 +1090,6 @@ export default function CarpenterExecutionPage() {
                           />
                         </div>
 
-                        {/* Submit Task Button */}
                         <button 
                           onClick={handleUploadTask} 
                           disabled={submitting || !taskCategory || taskProductPhotos.length < 2 || !taskVideo} 
@@ -1014,7 +1100,6 @@ export default function CarpenterExecutionPage() {
                       </div>
                     </div>
 
-                    {/* Handover Trigger (Hides entirely if already completely verified) */}
                     {status !== 'countertop_completed' && (
                       <div className={`p-5 rounded-2xl shadow-sm text-center border transition-all ${status === 'awaiting_countertop' ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'}`}>
                         {status === 'awaiting_countertop' ? (
@@ -1041,7 +1126,7 @@ export default function CarpenterExecutionPage() {
                   </>
                 )}
 
-                {/* SIGN OFF FORM (Appears only after clicking "Complete Job", replacing the task logger above) */}
+                {/* SIGN OFF FORM */}
                 {showSignOff && (
                   <div className="bg-white rounded-2xl border border-blue-200 p-5 sm:p-6 shadow-xl animate-in slide-in-from-bottom-10 fade-in duration-500">
                     <h2 className="text-sm font-black text-blue-800 uppercase tracking-wider mb-5 flex items-center gap-2">
@@ -1106,7 +1191,7 @@ export default function CarpenterExecutionPage() {
                         disabled={submitting || !pmName.trim() || !hasSig} 
                         className="w-full py-4 bg-gray-900 hover:bg-black text-white rounded-xl text-sm font-bold flex justify-center items-center gap-2 shadow-md disabled:opacity-50 transition-all"
                       >
-                        {submitting ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={18} />} Submit Sign-Off
+                        {submitting ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={18} />} Proceed to Final Checkout
                       </button>
                     </div>
                   </div>
@@ -1166,6 +1251,86 @@ export default function CarpenterExecutionPage() {
             <div className="border-t border-gray-100 px-6 py-4 flex gap-3 bg-gray-50">
               <button onClick={() => setConfirmPrompt(null)} className="flex-1 px-4 py-3 rounded-xl border border-gray-200 text-gray-600 text-sm font-bold hover:bg-gray-100 transition-colors bg-white">Cancel</button>
               <button onClick={() => { confirmPrompt.onConfirm(); setConfirmPrompt(null); }} className="flex-1 px-4 py-3 rounded-xl text-white text-sm font-bold bg-gray-900 hover:bg-black transition-colors shadow-sm">Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── END-OF-SHIFT ATTENDANCE SELFIE (mandatory) ── */}
+      {endSelfieModalOpen && (
+        <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center px-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden">
+            <div className="p-5 sm:p-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-base sm:text-lg font-black text-gray-900 flex items-center gap-2">
+                  <Camera size={20} className="text-[#8ED26B]" /> Selfie Required
+                </h3>
+                <button
+                  onClick={closeEndSelfieModal}
+                  disabled={uploadingEndSelfie}
+                  className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 disabled:opacity-40"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                A selfie is mandatory to check out. {showSignOff && ' This will also submit your final project sign-offs.'}
+              </p>
+
+              <input
+                ref={endSelfieInputRef}
+                type="file"
+                accept="image/*"
+                capture="user"
+                onChange={handleEndSelfieFileChange}
+                className="hidden"
+                id="carpenter-end-selfie-input"
+              />
+
+              {!endSelfiePreview ? (
+                <label
+                  htmlFor="carpenter-end-selfie-input"
+                  className="flex flex-col items-center justify-center gap-2 w-full h-44 rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 hover:bg-gray-100 cursor-pointer transition-colors"
+                >
+                  <Camera size={32} className="text-gray-300" />
+                  <span className="text-sm font-bold text-gray-500">Tap to take a selfie</span>
+                </label>
+              ) : (
+                <div className="relative w-full h-44 rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+                  <img src={endSelfiePreview} alt="Selfie preview" className="w-full h-full object-cover" />
+                  <button
+                    onClick={retakeEndSelfie}
+                    disabled={uploadingEndSelfie}
+                    className="absolute bottom-2 right-2 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-gray-700 bg-white/90 border border-gray-200 shadow-sm hover:bg-white transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw size={13} /> Retake
+                  </button>
+                </div>
+              )}
+
+              {endSelfieError && (
+                <p className="text-xs font-semibold text-red-500 mt-3 flex items-center gap-1.5">
+                  <AlertTriangle size={14} className="shrink-0" /> {endSelfieError}
+                </p>
+              )}
+            </div>
+            <div className="border-t border-gray-100 px-5 sm:px-6 py-4 flex gap-3 bg-gray-50">
+              <button
+                onClick={closeEndSelfieModal}
+                disabled={uploadingEndSelfie}
+                className="flex-1 px-4 py-3 rounded-xl border border-gray-200 text-gray-600 text-sm font-bold hover:bg-gray-100 transition-colors bg-white disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmEndSelfieAndEndDay}
+                disabled={uploadingEndSelfie || !endSelfieFile}
+                className="flex-1 px-4 py-3 rounded-xl text-white text-sm font-bold shadow-sm transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+                style={{ backgroundColor: '#8ED26B' }}
+              >
+                {uploadingEndSelfie ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                {uploadingEndSelfie ? 'Processing...' : showSignOff ? 'Submit & Finish' : 'Confirm & End Shift'}
+              </button>
             </div>
           </div>
         </div>

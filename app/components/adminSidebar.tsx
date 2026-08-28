@@ -5,16 +5,15 @@ import Image from 'next/image';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard,
-  Users,
-  KeyRound,
-  ShieldCheck,
-  LogOut,
   ShoppingCart,
-  ShoppingBag,
-  BarChart3,
-  ClipboardCheck,
+  CalendarClock,
+  CreditCard,
+  Layers,
+  Receipt,
   UserCheck,
-  Settings
+  BarChart3,
+  Settings,
+  LogOut
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useCurrentUser } from '@/app/utils/UsecurrentUser';
@@ -47,10 +46,11 @@ export default function AdminSidebar() {
   const allNavItems = [
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
     { name: 'Order Intake', path: '/orders', icon: ShoppingCart },
-    { name: 'Orders Schedule', path: '/schedule', icon: ShoppingBag },
-    { name: 'Transaction Details', path: '/execution-reports', icon: ClipboardCheck },
-    { name: 'Modular interior schedule', path: '/modular-admin-schedule', icon: UserCheck },
-    { name: 'Modular Transactions Details', path: '/modular-report', icon: ClipboardCheck },
+    { name: 'Orders Schedule', path: '/schedule', icon: CalendarClock },
+    { name: 'Transaction Details', path: '/execution-reports', icon: CreditCard },
+    { name: 'Modular interior schedule', path: '/modular-admin-schedule', icon: Layers },
+    { name: 'Modular Transactions Details', path: '/modular-report', icon: Receipt },
+    { name: 'Executor attendance', path: '/attendace', icon: UserCheck },
     { name: 'Reports', path: '/reports', icon: BarChart3 },
     { name: 'Settings', path: '/admin-settings', icon: Settings },
   ];

@@ -24,7 +24,9 @@ import {
   X,
   AlertTriangle,
   Eye,
-  Car
+  Car,
+  Camera,
+  RefreshCw
 } from 'lucide-react';
 
 export default function JobDetailPage() {
@@ -46,6 +48,14 @@ export default function JobDetailPage() {
   // ── Journey Modal ──
   const [journeyModalOpen, setJourneyModalOpen] = useState(false);
   const redirectTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // ── Accept Selfie Modal (mandatory before a job can actually be accepted) ──
+  const [selfieModalOpen, setSelfieModalOpen] = useState(false);
+  const [selfiePreview, setSelfiePreview] = useState<string | null>(null);
+  const [selfieFile, setSelfieFile] = useState<File | null>(null);
+  const [selfieError, setSelfieError] = useState('');
+  const [uploadingSelfie, setUploadingSelfie] = useState(false);
+  const selfieInputRef = useRef<HTMLInputElement | null>(null);
 
   // Cleanup redirect timer on unmount
   useEffect(() => {
@@ -88,44 +98,119 @@ export default function JobDetailPage() {
     }
   }, [order, orderId, router]);
 
-  const handleAccept = async () => {
-    setSubmitting(true);
-    setActionError('');
-    const now = new Date();
+  // ── Step 1: Accept Job button no longer accepts directly — it just opens
+  // the mandatory selfie capture modal. Nothing is written to the DB yet. ──
+  const openSelfieModal = () => {
+    setSelfieError('');
+    setSelfiePreview(null);
+    setSelfieFile(null);
+    setSelfieModalOpen(true);
+  };
 
-    // 1. Mark accepted and set 'in_progress'
-    const { error: sErr } = await supabase
-      .from('orders')
-      .update({
-        executive_response: 'accepted',
-        status: 'in_progress',
-        responded_at: now.toISOString()
-      })
-      .eq('id', orderId);
+  const closeSelfieModal = () => {
+    // Backing out here means the job is simply NOT accepted — status stays
+    // pending, no DB writes happen, executor can try again later.
+    if (uploadingSelfie) return;
+    setSelfieModalOpen(false);
+    setSelfiePreview(null);
+    setSelfieFile(null);
+    setSelfieError('');
+  };
 
-    if (sErr) {
-      console.error('Error accepting job:', sErr);
-      setActionError(`Could not accept the job: ${sErr.message}`);
-      setSubmitting(false);
+  const handleSelfieFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSelfieError('');
+    setSelfieFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setSelfiePreview(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  const retakeSelfie = () => {
+    setSelfiePreview(null);
+    setSelfieFile(null);
+    setSelfieError('');
+    if (selfieInputRef.current) selfieInputRef.current.value = '';
+  };
+
+  // ── Step 2: only once a selfie is captured & uploaded do we actually
+  // accept the job, start travel time, and redirect. This is the ONLY path
+  // that can move the job out of "pending". ──
+  const confirmSelfieAndAccept = async () => {
+    if (!selfieFile) {
+      setSelfieError('Please take a selfie to continue — it is required to accept this job.');
       return;
     }
 
-    // 2. Automatically trigger travel start inside execution table
-    const { error: iErr } = await supabase.from('job_execution').insert({
-      order_id: orderId,
-      travel_start_time: now.toISOString()
-    });
+    setUploadingSelfie(true);
+    setSelfieError('');
+    const now = new Date();
 
-    if (iErr && iErr.code === '23505') {
-       // if unique constraint violation, just update existing
-       await supabase.from('job_execution').update({ travel_start_time: now.toISOString() }).eq('order_id', orderId);
+    try {
+      // 1. Upload selfie to storage
+      const ext = selfieFile.name.split('.').pop() || 'jpg';
+      const path = `${orderId}/attendance-selfies/accept-${now.getTime()}.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from('job-proofs')
+        .upload(path, selfieFile, { upsert: true });
+
+      if (uploadErr) {
+        setSelfieError(`Selfie upload failed: ${uploadErr.message}`);
+        setUploadingSelfie(false);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage.from('job-proofs').getPublicUrl(path);
+      const selfieUrl = urlData?.publicUrl || null;
+
+      // 2. Mark accepted and set 'in_progress' — only now
+      const { error: sErr } = await supabase
+        .from('orders')
+        .update({
+          executive_response: 'accepted',
+          status: 'in_progress',
+          responded_at: now.toISOString()
+        })
+        .eq('id', orderId);
+
+      if (sErr) {
+        console.error('Error accepting job:', sErr);
+        setSelfieError(`Could not accept the job: ${sErr.message}`);
+        setUploadingSelfie(false);
+        return;
+      }
+
+      // 3. Trigger travel start + store the accept selfie against job_execution
+      const { error: iErr } = await supabase.from('job_execution').insert({
+        order_id: orderId,
+        travel_start_time: now.toISOString(),
+        accept_selfie_url: selfieUrl
+      });
+
+      if (iErr && iErr.code === '23505') {
+        // if unique constraint violation, just update existing
+        await supabase
+          .from('job_execution')
+          .update({ travel_start_time: now.toISOString(), accept_selfie_url: selfieUrl })
+          .eq('order_id', orderId);
+      }
+
+      // 4. Close selfie modal, trigger journey animation, redirect
+      setUploadingSelfie(false);
+      setSelfieModalOpen(false);
+      setSelfiePreview(null);
+      setSelfieFile(null);
+      setJourneyModalOpen(true);
+      redirectTimer.current = setTimeout(() => {
+        router.push(`/my-orders/${orderId}/execute`);
+      }, 2800);
+    } catch (err: any) {
+      console.error('Error during selfie accept flow:', err);
+      setSelfieError('Something went wrong while accepting the job. Please try again.');
+      setUploadingSelfie(false);
     }
-
-    // 3. Trigger animations and redirect directly to execution page
-    setJourneyModalOpen(true);
-    redirectTimer.current = setTimeout(() => {
-      router.push(`/my-orders/${orderId}/execute`);
-    }, 2800);
   };
 
   const handleReject = async () => {
@@ -472,12 +557,12 @@ export default function JobDetailPage() {
         {isPending && !isCompleted && (
           <section className="fixed sm:sticky bottom-0 sm:bottom-4 left-0 right-0 mt-auto bg-white/95 backdrop-blur-xl border-t sm:border border-gray-200 sm:rounded-2xl p-3 sm:p-4 shadow-lg grid grid-cols-2 gap-2.5 sm:gap-3 max-w-3xl sm:mx-auto w-full z-10">
             <button
-              onClick={handleAccept}
+              onClick={openSelfieModal}
               disabled={submitting}
               className="flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-5 py-3 sm:py-3.5 rounded-xl text-xs sm:text-sm font-bold text-white shadow-sm transition-all disabled:opacity-60 active:scale-[0.98]"
               style={{ backgroundColor: '#8ED26B' }}
             >
-              {submitting ? <Loader2 size={18} className="animate-spin shrink-0" /> : <CheckCircle2 size={18} className="shrink-0" />}
+              <CheckCircle2 size={18} className="shrink-0" />
               <span className="truncate">Accept Job</span>
             </button>
             <button
@@ -550,6 +635,85 @@ export default function JobDetailPage() {
               >
                 {submitting ? <Loader2 size={16} className="animate-spin" /> : null}
                 Confirm Reject
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================= ACCEPT SELFIE MODAL (mandatory) ================================= */}
+      {selfieModalOpen && (
+        <div className="fixed inset-0 z-[65] bg-black/50 backdrop-blur-sm flex items-center justify-center px-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5 sm:p-6">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-base sm:text-lg font-black text-gray-900 flex items-center gap-2">
+                <Camera size={20} className="text-[#8ED26B]" /> Selfie Required
+              </h3>
+              <button
+                onClick={closeSelfieModal}
+                disabled={uploadingSelfie}
+                className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 disabled:opacity-40"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm text-gray-500 mb-4">
+              A selfie is mandatory to accept this job. You won't be able to continue to the execution screen without it.
+            </p>
+
+            <input
+              ref={selfieInputRef}
+              type="file"
+              accept="image/*"
+              capture="user"
+              onChange={handleSelfieFileChange}
+              className="hidden"
+              id="accept-selfie-input"
+            />
+
+            {!selfiePreview ? (
+              <label
+                htmlFor="accept-selfie-input"
+                className="flex flex-col items-center justify-center gap-2 w-full h-48 rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 hover:bg-gray-100 cursor-pointer transition-colors"
+              >
+                <Camera size={32} className="text-gray-300" />
+                <span className="text-sm font-bold text-gray-500">Tap to take a selfie</span>
+              </label>
+            ) : (
+              <div className="relative w-full h-48 rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+                <img src={selfiePreview} alt="Selfie preview" className="w-full h-full object-cover" />
+                <button
+                  onClick={retakeSelfie}
+                  disabled={uploadingSelfie}
+                  className="absolute bottom-2 right-2 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-gray-700 bg-white/90 border border-gray-200 shadow-sm hover:bg-white transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw size={13} /> Retake
+                </button>
+              </div>
+            )}
+
+            {selfieError && (
+              <p className="text-xs font-semibold text-red-500 mt-3 flex items-center gap-1.5">
+                <AlertTriangle size={14} className="shrink-0" /> {selfieError}
+              </p>
+            )}
+
+            <div className="flex gap-3 mt-5">
+              <button
+                onClick={closeSelfieModal}
+                disabled={uploadingSelfie}
+                className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-gray-600 bg-gray-50 border border-gray-200 hover:bg-gray-100 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmSelfieAndAccept}
+                disabled={uploadingSelfie || !selfieFile}
+                className="flex-1 px-4 py-3 rounded-xl text-sm font-bold text-white shadow-sm transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+                style={{ backgroundColor: '#8ED26B' }}
+              >
+                {uploadingSelfie ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                {uploadingSelfie ? 'Accepting...' : 'Confirm & Accept'}
               </button>
             </div>
           </div>
