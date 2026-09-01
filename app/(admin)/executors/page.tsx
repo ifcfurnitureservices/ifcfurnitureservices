@@ -45,8 +45,11 @@ export default function ExecutorsPage() {
   };
 
   const handleSave = async () => {
-    // Add validation for the mandatory name, phone, and role fields
-    if (!formData.name || !formData.phone) { setErrorMsg('Name and phone number are required.'); return; }
+    // Add validation for mandatory name, email, phone, and role fields
+    if (!formData.name || !formData.email || !formData.phone) { 
+      setErrorMsg('Name, email address, and phone number are required.'); 
+      return; 
+    }
     if (!formData.role) { setErrorMsg('Please select a role.'); return; }
     if (!editingExecutor && !formData.password) { setErrorMsg('Password is required.'); return; }
     setSaving(true);
@@ -304,7 +307,7 @@ Please keep these credentials safe.
                 <input className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#8ED26B] transition text-gray-900 placeholder-gray-400" placeholder="Enter full name" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-500 mb-1.5">Email Address <span className="text-gray-400 font-normal">(Optional)</span></label>
+                <label className="block text-xs font-semibold text-gray-500 mb-1.5">Email Address <span className="text-red-400">*</span></label>
                 <input type="email" className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#8ED26B] transition text-gray-900 placeholder-gray-400" placeholder="Enter email" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} />
               </div>
 
